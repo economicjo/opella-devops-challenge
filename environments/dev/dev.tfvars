@@ -48,7 +48,7 @@ subnets = [
         access                  = "Allow"
         protocol                = "Tcp"
         destination_port_range  = "8080"
-        source_address_prefix   = "10.1.1.0/24"  # Solo desde la subred web
+        source_address_prefix   = "10.1.1.0/24"  # Only from the web subnet
       }
     }
   },
