@@ -1,0 +1,154 @@
+name: 'Terraform CI/CD'
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Entorno a desplegar (dev/prod)'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+
+permissions:
+  contents: read
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  TF_VAR_admin_ssh_public_key: ${{ secrets.TF_VAR_ADMIN_SSH_PUBLIC_KEY }}
+
+jobs:
+  validate:
+    name: 'Validate'
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        environment: [dev, prod]
+        
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.7
+    
+    - name: Terraform Format
+      run: terraform fmt -check -recursive
+      
+    - name: Terraform Init
+      run: |
+        terraform init -backend-config=environments/${{ matrix.environment }}/${{ matrix.environment }}.tfbackend
+    
+    - name: Terraform Validate
+      run: |
+        terraform validate
+    
+    - name: Run tfsec
+      uses: aquasecurity/tfsec-action@v1.0.0
+    
+    - name: Run checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        framework: terraform
+
+  plan:
+    name: 'Plan'
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    strategy:
+      matrix:
+        environment: [dev, prod]
+        
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.7
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+    
+    - name: Terraform Init
+      run: |
+        terraform init -backend-config=environments/${{ matrix.environment }}/${{ matrix.environment }}.tfbackend
+      
+    - name: Terraform Plan
+      id: plan
+      run: |
+        terraform plan -no-color -input=false -var-file=environments/${{ matrix.environment }}/${{ matrix.environment }}.tfvars -out=tfplan
+      continue-on-error: true
+    
+    - name: Update Pull Request
+      uses: actions/github-script@v6
+      if: github.event_name == 'pull_request'
+      env:
+        PLAN: ${{ steps.plan.outputs.stdout }}
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const output = `#### Terraform Plan Output for ${{ matrix.environment }}
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+          *Plan de Terraform generado en ${new Date().toTimeString()}*`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })
+    
+    - name: Terraform Plan Status
+      if: steps.plan.outcome == 'failure'
+      run: exit 1
+
+  apply:
+    name: 'Apply'
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.7
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+    
+    - name: Set environment
+      id: set-env
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "ENV=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+        else
+          echo "ENV=prod" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Terraform Init
+      run: |
+        terraform init -backend-config=environments/${{ steps.set-env.outputs.ENV }}/${{ steps.set-env.outputs.ENV }}.tfbackend
+    
+    - name: Terraform Plan
+      run: |
+        terraform plan -input=false -var-file=environments/${{ steps.set-env.outputs.ENV }}/${{ steps.set-env.outputs.ENV }}.tfvars -out=tfplan
+    
+    - name: Terraform Apply
+      run: |
+        terraform apply -auto-approve tfplan
