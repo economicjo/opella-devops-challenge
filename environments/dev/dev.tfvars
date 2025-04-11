@@ -32,7 +32,7 @@ subnets = [
         access                  = "Allow"
         protocol                = "Tcp"
         destination_port_range  = "22"
-        source_address_prefix   = "123.123.123.123/32"  # IP del administrador
+        source_address_prefix   = "123.123.123.123/32"  # Administrator IP
       }
     }
   },
